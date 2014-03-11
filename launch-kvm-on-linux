@@ -1,0 +1,23 @@
+ KVM sobre Linux !
+
+Cree esta entrada porque tengo unas máquinas virtuales y se me olvidó como volverlas a correr, en este caso instalaré  un guest sobre Fedora 20 para saber que onda desde un principio.
+
+Primero que nada un update:
+$ sudo yum update
+
+Instalar paquetes:
+# yum install -y qemu-kvm qemu-kvm-tools
+
+Verificar modulos del kernel:
+# modprobe kvm-< intel / amd >
+
+Crear imagen del disco.
+# qemu-img create -f qcow2 10G 
+
+Formatting 'vdisk.img', fmt=qcow2 size=10737418240 encryption=off cluster_size=65536 lazy_refcounts=off
+
+Instalar el sistema operativo:
+# qemu-system-x86_64 -hda vdisk.img -cdrom /path/ubuntu-12.04.4-server-amd64.iso -boot d -m 1024
+
+Correrlo:
+# qemu-system-x86_64 -hda ubuntu12.04vdisk.img -m 1024

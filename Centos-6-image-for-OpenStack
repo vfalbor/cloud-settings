@@ -1,0 +1,258 @@
+A CentOS 6 Image for OpenStack
+
+http://hackstack.org/x/blog/2013/04/25/a-centos-6-image-for-openstack/
+
+
+April 25, 2013 at 04:25 AM | categories: openstack, rhel, centos
+
+[Updated 01Oct2013 to correct spelling and command formatting]
+
+This is the next installment in the never-ending series of OpenStack image builds. Today's target: CentOS
+Image Characteristics
+
+The usual suspects are present:
+
+    minimal package install
+    serial console support
+    timezone is Etc/UTC
+    hostname set to instance name
+    a single partition with root filesystem, no swap
+    grow root filesystem to device size
+    enable EPEL (install epel-release)
+    enable could-init repo to get 0.7.1
+
+A few things are still lacking:
+
+    selinux is in permissive mode, make enforcing
+    strengthen default firewall
+
+Build
+
+Tools like Oz are a good idea in theory but in practice seem to be quite picky about the environment they will correctly run on. I'm looking at you libguestfs. Other tools like the venerable appliance-creator get hung up on needing the same version of things in the host as in the chroot.
+
+Good ole virt-install happily runs on damn near everything. This build has been tested on CentOS 6.4 and Ubuntu 12.10. TODO(dtroyer): don't run this all as root
+
+Let's get started.
+
+    Install virt-install and all its prerequisites
+
+        on Ubuntu:
+
+        sudo apt-get install virtinst
+
+        on CentOS:
+
+        sudo yum install libvirt python-virtinst qemu-kvm
+        sudo /etc/init.d/libvirtd start
+
+    Get a CentOS 6 kickstart file with minimal stuff and the extras that we need. Included in %post is a bit to resize the root filesystem to the size of the actual device provided to the VM.
+
+    Create base image with virt-install:
+
+    sudo virt-install \
+        --name centos-6-x86_64 \
+        --ram 1024 \
+        --cpu host \
+        --vcpus 1 \
+        --nographics \
+        --os-type=linux \
+        --os-variant=rhel6 \
+        --location=http://mirrors.kernel.org/centos/6/os/x86_64 \
+        --initrd-inject=centos-6-x86_64.ks \
+        --extra-args="ks=file:/centos-6-x86_64.ks text console=tty0 utf8 console=ttyS0,115200" \
+        --disk path=/var/lib/libvirt/images/centos-6-x86_64.img,size=2,bus=virtio \
+        --force \
+        --noreboot
+
+    Point to the bridge with external connectivity if it is not eth0:
+
+    --network=bridge=br0
+
+    If libguestfs is functional on your build platform:
+
+    sudo yum install -y libguestfs-tools
+    sudo virt-sysprep --no-selinux-relabel -a /var/lib/libvirt/images/centos-6-x86_64.img
+    sudo virt-sparsify --convert qcow2 --compress /var/lib/libvirt/images/centos-6-x86_64.img centos-6-x86_64.qcow2
+
+    Kick it into the cloud image repository:
+
+    glance image-create --name "CentOS 6 x86_64" \
+        --disk-format qcow2 --container-format bare \
+        --is-public false --file centos-6-x86_64.qcow2
+
+
+
+==========================================
+
+
+# This is a basic CentOS 6 spin designed to work in OpenStack and other
+# virtualized environments. It's configured with cloud-init so it will
+# take advantage of ec2-compatible metadata services for provisioning
+# ssh keys and user data.
+
+# Basic kickstart bits
+text
+skipx
+cmdline
+install
+
+# Installation path
+url --url=http://mirrors.kernel.org/centos/6/os/x86_64
+
+# Repositories
+repo --name=base --baseurl=http://mirrors.kernel.org/centos/6/os/x86_64
+repo --name=updates --baseurl=http://mirrors.kernel.org/centos/6/updates/x86_64
+repo --name=epel --baseurl=http://mirrors.kernel.org/fedora-epel/6/x86_64
+repo --name=cloud-init --baseurl=http://repos.fedorapeople.org/repos/openstack/cloud-init/epel-6/
+
+# Common configuration
+rootpw --iscrypted $1$fakehash-bruteforcetocrackitnow
+lang en_US.UTF-8
+keyboard us
+timezone --utc UTC
+network --onboot=on --bootproto=dhcp
+firewall --enabled
+auth --useshadow --enablemd5
+firstboot --disable
+poweroff
+
+# TODO(dtroyer): selinux isn't totally happy yet
+#selinux --enforcing
+selinux --permissive
+
+# Simple disk layout
+zerombr
+clearpart --all --initlabel
+bootloader --location=mbr --append="console=tty console=ttyS0 notsc"
+part / --size 100 --fstype ext4 --grow
+
+# Start a few things
+services --enabled=acpid,ntpd,sshd,cloud-init
+
+# Bare-minimum packages
+%packages --nobase
+@server-policy
+acpid
+logrotate
+ntp
+ntpdate
+openssh-clients
+rng-tools
+rsync
+screen
+tmpwatch
+wget
+
+epel-release
+cloud-init
+
+# Some things from @core we can do without in a minimal install
+-biosdevname
+-NetworkManager
+-sendmail
+
+%end
+
+# Fix up the installation
+%post
+
+# Cleanup after yum
+yum clean all
+
+# Rename the default cloud-init user to 'centos'
+
+# cloud-init 0.6 config format
+#sed -i 's/^user: ec2-user/user: centos/g' /etc/cloud/cloud.cfg
+
+# cloud-init 0.7 config format
+#sed -i 's/ name: cloud-user/ name: centos/g' /etc/cloud/cloud.cfg
+sed -i 's/name: cloud-user/name: centos\
+    lock_passwd: True\
+    gecos: CentOS\
+    groups: \[adm, audio, cdrom, dialout, floppy, video, dip\]\
+    sudo: \[\"ALL=(ALL) NOPASSWD:ALL\"\]\
+    shell: \/bin\/bash/' /etc/cloud/cloud.cfg
+
+# Turn off additional services
+chkconfig postfix off
+
+
+# Tweak udev to not auto-gen virtual network devices
+cat <<EOF >/tmp/udev.patch.1
+# ignore KVM virtual interfaces
+ENV{MATCHADDR}=="52:54:00:*", GOTO="persistent_net_generator_end"
+# ignore VMWare virtual interfaces
+ENV{MATCHADDR}=="00:0c:29:*|00:50:56:*", GOTO="persistent_net_generator_end"
+# ignore Hyper-V virtual interfaces
+ENV{MATCHADDR}=="00:15:5d:*", GOTO="persistent_net_generator_end"
+# ignore Eucalyptus virtual interfaces
+ENV{MATCHADDR}=="d0:0d:*", GOTO="persistent_net_generator_end"
+# ignore Ravello Systems virtual interfaces
+ENV{MATCHADDR}=="2c:c2:60:*", GOTO="persistent_net_generator_end"
+# ignore OpenStack default virtual interfaces
+ENV{MATCHADDR}=="fa:16:3e:*", GOTO="persistent_net_generator_end"
+
+EOF
+# sed-ism: we need to N below to make this an insert rather than an append
+sed -e '/\# do not use empty address/ {
+  h
+  r /tmp/udev.patch.1
+  g
+  N
+}' \
+  /lib/udev/rules.d/75-persistent-net-generator.rules >/etc/udev/rules.d/75-persistent-net-generator.rules
+
+
+# Set up to grow root in initramfs
+cat << EOF > 05-grow-root.sh
+#!/bin/sh
+
+/bin/echo
+/bin/echo Resizing root filesystem
+
+/bin/echo "d
+n
+p
+1
+
+
+w
+" | /sbin/fdisk -c -u /dev/vda
+/sbin/e2fsck -f /dev/vda1
+/sbin/resize2fs /dev/vda1
+EOF
+
+chmod +x 05-grow-root.sh
+
+dracut --force --include 05-grow-root.sh /mount --install 'echo fdisk e2fsck resize2fs' /boot/"initramfs-grow_root-$(ls /boot/|grep initramfs|sed s/initramfs-//g)" $(ls /boot/|grep vmlinuz|sed s/vmlinuz-//g)
+rm -f 05-grow-root.sh
+
+tail -4 /boot/grub/grub.conf | sed s/initramfs/initramfs-grow_root/g| sed s/CentOS/ResizePartition/g | sed s/crashkernel=auto/crashkernel=0@0/g >> /boot/grub/grub.conf
+
+# let's run the kernel & initramfs that expands the partition only once
+echo "savedefault --default=1 --once" | grub --batch
+
+
+# Leave behind a build stamp
+echo "build=$(date +%F.%T)" >/etc/.build
+
+%end
+
+================================Add VNC example================================
+
+
+<domain type='kvm'>
+  <name>centos1</name>
+  <uuid>88d067cf-e5f7-7229-f35f-472a9c884864</uuid>
+  <memory>1048576</memory>
+  <currentMemory>1048576</currentMemory>
+  <vcpu>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='rhel5.4.0'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  ..................................
+    <graphics type='vnc' port='-1' autoport='yes' keymap='en-us'/>
+  </devices>
+</domain>
+
